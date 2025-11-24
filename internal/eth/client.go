@@ -37,7 +37,7 @@ func NewMintContract(client *ethclient.Client, contractAddr string, chainID *big
 		return nil, err
 	}
 
-	fromAddr := crypto.PubkeyToAddress(privKey.Public().(*ecdsa.PublicKey))
+	fromAddr := crypto.PubkeyToAddress(privKey.PublicKey)
 	auth, err := bind.NewKeyedTransactorWithChainID(privKey, chainID)
 	if err != nil {
 		return nil, err
