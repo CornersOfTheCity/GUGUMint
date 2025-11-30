@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"gorm.io/gorm"
 
@@ -43,9 +44,9 @@ func (s *MintService) ProcessMint(ctx context.Context, hashHex, addrHex string) 
 		return nil, err
 	}
 
-	// 允许 status 为 "" 或 "unused" 的记录使用；
-	// 其余非空状态（如 pending/success/failed）视为已使用，防止重复使用
-	if mr.Status != "" && mr.Status != "unused" {
+	// 仅当状态为 pending 或 success 时视为已使用，防止重复使用；
+	// failed 等状态允许重新使用该 hash
+	if mr.Status == "pending" || mr.Status == "success" {
 		return nil, errors.New("hash already used")
 	}
 
@@ -78,9 +79,8 @@ func (s *MintService) ProcessMint(ctx context.Context, hashHex, addrHex string) 
 	}
 
 	mr.Address = addrHex
-	// 由于实际交易由前端钱包发起，这里在签名发放时就标记为 success，
-	// 表示该 hash 已经被使用，防止重复使用同一个 hash
-	mr.Status = "success"
+	// 在签名发放阶段仅标记为 signed，真正 success 由链上交易结果决定
+	mr.Status = "signed"
 	mr.UpdatedAt = time.Now().Unix()
 
 	if err := s.db.WithContext(ctx).Save(&mr).Error; err != nil {
@@ -97,4 +97,94 @@ func (s *MintService) ProcessMint(ctx context.Context, hashHex, addrHex string) 
 		R:       rHex,
 		S:       sHex,
 	}, nil
+}
+
+// SaveTxHash 将前端上报的 txHash 记录到对应的 MintRequest，并标记为 pending
+func (s *MintService) SaveTxHash(ctx context.Context, hashHex, addrHex, txHash string) (*db.MintRequest, error) {
+	var mr db.MintRequest
+	if err := s.db.WithContext(ctx).Where("hash = ?", hashHex).First(&mr).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("hash not found")
+		}
+		return nil, err
+	}
+
+	if mr.Address != "" && mr.Address != addrHex {
+		return nil, errors.New("address mismatch")
+	}
+
+	if mr.Status != "signed" && mr.Status != "pending" {
+		return nil, errors.New("invalid status for tx hash binding")
+	}
+
+	mr.Address = addrHex
+	mr.TxHash = txHash
+	mr.Status = "pending"
+	mr.UpdatedAt = time.Now().Unix()
+
+	if err := s.db.WithContext(ctx).Save(&mr).Error; err != nil {
+		return nil, err
+	}
+
+	return &mr, nil
+}
+
+// GetStatusByTxHash 根据 txHash 查询当前 mint 请求状态
+func (s *MintService) GetStatusByTxHash(ctx context.Context, txHash string) (*db.MintRequest, error) {
+	var mr db.MintRequest
+	if err := s.db.WithContext(ctx).Where("tx_hash = ?", txHash).First(&mr).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("tx hash not found")
+		}
+		return nil, err
+	}
+	return &mr, nil
+}
+
+// StartTxWatcher 启动一个简单的轮询任务，根据链上交易收据更新 pending 状态
+func (s *MintService) StartTxWatcher(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.updatePendingTx(ctx)
+			}
+		}
+	}()
+}
+
+func (s *MintService) updatePendingTx(ctx context.Context) {
+	var list []db.MintRequest
+	if err := s.db.WithContext(ctx).Where("status = ? AND tx_hash <> ''", "pending").Find(&list).Error; err != nil {
+		return
+	}
+
+	for _, mr := range list {
+		// 防御性校验
+		if mr.TxHash == "" {
+			continue
+		}
+
+		receipt, err := s.contract.Client.TransactionReceipt(ctx, common.HexToHash(mr.TxHash))
+		if err != nil {
+			// 这里不区分未打包/真正错误，简单跳过等待下次轮询
+			continue
+		}
+		if receipt == nil {
+			continue
+		}
+
+		if receipt.Status == types.ReceiptStatusSuccessful {
+			mr.Status = "success"
+		} else {
+			mr.Status = "failed"
+		}
+		mr.UpdatedAt = time.Now().Unix()
+		_ = s.db.WithContext(ctx).Save(&mr).Error
+	}
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
+	"time"
 
 	"GUGUMint/internal/config"
 	"GUGUMint/internal/db"
@@ -30,6 +32,7 @@ func main() {
 	}
 
 	mintService := service.NewMintService(dbConn, contract)
+	mintService.StartTxWatcher(context.Background(), 2*time.Second)
 
 	r := httpserver.NewRouter(mintService)
 
