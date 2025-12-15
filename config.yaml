@@ -6,6 +6,6 @@ db_port: 5432
 db_sslmode: "disable"
 
 bsc_rpc_url: "https://data-seed-prebsc-1-s1.binance.org:8545"
-contract_address: "0xa8Ad178B46372ebd9F0ee5dDCC6e13987C8F91A2"
+contract_address: "0xC1717dBF41Ff11c28e7Cd8cF11FA15E55c615EB2"
 private_key: "0xc86b53f1cdb44851bba542b4e4da4a8a39aed1634937f97420dd7ee9cd38df18"
-chain_id: 97
+chain_id: 56
